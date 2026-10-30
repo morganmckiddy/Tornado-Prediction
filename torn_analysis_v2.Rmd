@@ -1,0 +1,333 @@
+---
+title: "torn_analysis_v2"
+author: "Morgan Mckiddy"
+date: "2026-07-22"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(reticulate)
+py_config()
+py_require(c("pandas", "numpy", "scikit-learn", "matplotlib", "statsmodels"))
+```
+
+Set Directory / Read in Data / Installation of packages
+```{r, warning=FALSE, include=FALSE}
+
+tornado_dataset <- read.csv("tornado_dataset.csv")
+tornado_dataset <- tornado_dataset[,-1]
+
+library(dplyr)
+library(lubridate)
+library(tidyr)
+
+attach(tornado_dataset)
+```
+
+Create data visualizations
+```{r}
+pairs(tornado_dataset)
+```
+
+
+Correlations
+```{r}
+sort(cor(tornado_dataset, method = "spearman")["Monthly_Tornado_Count",])
+```
+
+
+
+Train Test split
+```{python, warning=FALSE, include=FALSE}
+import pandas as pd
+import numpy as np
+import sklearn
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+from sklearn.feature_selection import SequentialFeatureSelector
+from sklearn.linear_model import PoissonRegressor
+
+# convert R list into dataframe
+tornadoes_df = pd.DataFrame(r.tornado_dataset)
+x = tornadoes_df.drop(columns=["Monthly_Tornado_Count"]).values
+y = tornadoes_df["Monthly_Tornado_Count"].values
+
+# train test split 70 / 30 - СONSTRUCTING AN EFFICIENT MACHINE LEARNING MODEL FOR TORNADO PREDICTION
+X_train, X_test, y_train, y_test = train_test_split(
+    x, y,
+    test_size=0.3,
+    random_state=42
+)
+
+# add first row (column names) to features list
+feature_names = tornadoes_df.drop(columns=["Monthly_Tornado_Count"]).columns.tolist()
+
+# Backwards selection using SequentialFeatureSelector
+poisson = PoissonRegressor()
+
+# sfs initialization
+sfs = SequentialFeatureSelector(
+    poisson,
+    n_features_to_select = "auto",
+    direction="backward", # backward selection - start with all predictors in model
+    scoring="r2",
+    cv=5,
+    n_jobs=1
+)
+
+# fit training data only to sfs - prevents leakage
+sfs.fit(X_train, y_train) # add feature names back to dataset
+
+
+selected_mask = sfs.get_support() # int index of features
+selected_features = [f for f, s in zip(feature_names, selected_mask) if s] # set names to selected features
+selected_idx = [i for i, s in enumerate(selected_mask) if s] # all selected features
+
+# use selected features in training data only
+X_train_selected = X_train[:, selected_idx]
+X_test_selected = X_test[:, selected_idx]
+
+# unscaled data for r: poisson regression - coefficients automatically scale
+r_X_train = X_train_selected 
+r_y_train = y_train
+r_X_test = X_test_selected
+r_y_test = y_test
+
+# scaled data for python
+scaler_X = StandardScaler()
+scaler_y = StandardScaler()
+
+X_train = scaler_X.fit_transform(X_train_selected) # V1 V2 V3 V4 V5 V6 V7
+X_test = scaler_X.transform(X_test_selected)
+
+y_train = scaler_y.fit_transform(y_train.reshape(-1, 1)).ravel()
+y_test = scaler_y.transform(y_test.reshape(-1, 1)).ravel()
+```
+
+Backwards Selection - Starts with all variables and eliminates least statistically significant
+```{python}
+print("Selected features:", selected_features)
+print("Removed features:", [f for f, s in zip(feature_names,selected_mask) if not s])
+```
+
+Do so after train/test split but do only on training data to prevent leakage
+
+R: Poisson Regression
+```{r}
+# pull variables from python and create dataframe
+train_set <- as.data.frame(py$r_X_train)
+test_set <- as.data.frame(py$r_X_test)
+colnames(train_set) <- py$selected_features
+colnames(test_set) <- py$selected_features
+train_set$Monthly_Tornado_Count <- as.integer(py$r_y_train)
+test_set$Monthly_Tornado_Count <- as.integer(py$r_y_test)
+
+# poisson glm initialization
+poisson_model <- glm(Monthly_Tornado_Count ~ ., family = "poisson", data = train_set)
+
+# model summary
+summary(poisson_model)
+
+# make predictions using test set
+y_pred <- predict(poisson_model, newdata = test_set, type = "response")
+
+mae <- mean(abs(test_set$Monthly_Tornado_Count - y_pred))
+mse <- mean((test_set$Monthly_Tornado_Count - y_pred)^2)
+
+plot(poisson_model)
+
+poisson_aic <- AIC(poisson_model)
+print(mae)
+print(mse)
+print(poisson_aic)
+```
+
+Python: Random Forest Regressor
+```{python}
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.datasets import make_regression
+from sklearn.metrics import mean_squared_error, r2_score
+
+# random forest regressor initialization
+rfr_regressor = RandomForestRegressor(
+    n_estimators=200, # how to choose n_estimators
+    random_state=42,
+    oob_score=True # outputs model fit score
+)
+
+# fit to training today
+rfr_regressor.fit(X_train, y_train)
+
+print("Out-of-Bag Score:", rfr_regressor.oob_score_)
+
+# predictions
+y_pred = rfr_regressor.predict(X_test)
+
+mse = mean_squared_error(y_test, y_pred)
+r2 = r2_score(y_test, y_pred)
+
+print("Mean Squared Error:", mse)
+print("R-squared:", r2)
+print()
+```
+
+KNN Regressor
+```{python}
+from sklearn.neighbors import KNeighborsRegressor
+
+# knn initialization
+knn_regressor = KNeighborsRegressor(n_neighbors=5) # play around with num of neighbors
+
+# fit to training data
+knn_regressor.fit(X_train, y_train)
+
+# predictions
+y_pred = knn_regressor.predict(X_test)
+
+mse = mean_squared_error(y_test, y_pred)
+r2 = r2_score(y_test, y_pred)
+
+print(f'Mean Squared Error: {mse}')
+print(f'R-squared: {r2}')
+```
+
+
+SVM
+```{python}
+import numpy as np
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+from sklearn.svm import SVR
+
+# LINEAR: svm initialization
+svr_linear = SVR(kernel='linear', C=100, epsilon=0.1)
+# fit to training data
+svr_linear.fit(X_train, y_train)
+# predictions - linear fit
+y_pred_linear = svr_linear.predict(X_test)
+
+# POLY: svm initialization
+svr_poly = SVR(kernel='poly', C=100, epsilon=0.1)
+# fit to training data
+svr_poly.fit(X_train, y_train)
+# predictions - linear fit
+y_pred_poly = svr_poly.predict(X_test)
+
+# RBF (Radial Basis Function): svm initialization
+svr_rbf = SVR(kernel='rbf', C=100, gamma=0.5, epsilon=0.1)
+# fit to training data 
+svr_rbf.fit(X_train, y_train)
+# predictions - rbf fit
+y_pred_rbf = svr_rbf.predict(X_test)
+
+sorted_idx = np.argsort(X_test[:, 0])
+
+X_test_sorted = X_test[sorted_idx]
+y_test_sorted = y_test[sorted_idx]
+
+y_pred_linear_sorted = y_pred_linear[sorted_idx]
+y_pred_poly_sorted = y_pred_poly[sorted_idx]
+y_pred_rbf_sorted = y_pred_rbf[sorted_idx]
+```
+
+Linear SVM Visualization
+```{python}
+plt.figure(figsize=(5, 5))
+plt.scatter(y_test, y_pred_linear, color='green', alpha=0.5, label='Actual vs Predicted')
+plt.plot([y_test.min(), y_test.max()],
+         [y_test.min(), y_test.max()],
+         color='black', linewidth=2, label='Perfect Fit')
+
+plt.title("Linear Kernel SVR")
+plt.xlabel("Predicted Tornado Count (scaled)")
+plt.ylabel("Actual Tornado Count (scaled)")
+plt.legend()
+plt.show()
+
+rmse_linear = np.sqrt(mean_squared_error(y_test, y_pred_linear))
+mse_linear = mean_squared_error(y_test, y_pred_linear)
+r2_linear = r2_score(y_test, y_pred_linear)
+
+print("Linear SVR R^2:", r2_linear)
+print("Linear SVR RMSE:", rmse_linear)
+print("Linear SVR MSE:", mse_linear)
+```
+
+Poly SVM Visualization
+```{python}
+plt.figure(figsize=(8, 5))
+plt.scatter(y_test, y_pred_poly, color='green', alpha=0.5, label='Actual vs Predicted')
+plt.plot([y_test.min(), y_test.max()],
+         [y_test.min(), y_test.max()],
+         color='black', linewidth=2, label='Perfect Fit')
+
+plt.title("Poly Kernel SVR")
+plt.xlabel("Predicted Tornado Count (scaled)")
+plt.ylabel("Actual Tornado Count (scaled)")
+plt.legend()
+plt.show()
+
+rmse_poly = np.sqrt(mean_squared_error(y_test, y_pred_poly))
+mse_poly = mean_squared_error(y_test, y_pred_poly)
+r2_poly = r2_score(y_test, y_pred_poly)
+
+print("Poly SVR R^2:", r2_poly)
+print("Poly SVR RMSE:", rmse_poly)
+print("Poly SVR MSE:", mse_poly)
+```
+
+RBF SVM Visualization
+```{python}
+plt.figure(figsize=(8, 5))
+plt.scatter(y_test, y_pred_rbf, color='green', alpha=0.5, label='Actual vs Predicted')
+plt.plot([y_test.min(), y_test.max()],
+         [y_test.min(), y_test.max()],
+         color='black', linewidth=2, label='Perfect Fit')
+
+plt.title("RBF Kernel SVR – Diabetes Dataset")
+plt.xlabel("Predicted Tornado Count (scaled)")
+plt.ylabel("Actual Tornado Count (scaled)")
+plt.legend()
+plt.show()
+
+rmse_rbf = np.sqrt(mean_squared_error(y_test, y_pred_rbf))
+mse_rbf = mean_squared_error(y_test, y_pred_rbf)
+r2_rbf = r2_score(y_test, y_pred_rbf)
+
+print("RBF SVR R^2:", r2_rbf)
+print("RBF SVR RMSE:", rmse_rbf)
+print("RBF SVR MSE:", mse_rbf)
+```
+
+Implementation of Zero-Inflated Poisson
+```{r}
+library(ggplot2)
+library(pscl)
+library(boot)
+```
+
+```{r}
+zip_model <- zeroinfl(Monthly_Tornado_Count ~ ., data = train_set)
+summary(zip_model)
+
+zip_null <- zeroinfl(Monthly_Tornado_Count ~ 1, data = train_set)
+1 - as.numeric(logLik(zip_model)) / as.numeric(logLik(zip_null))
+
+zip_aic <- AIC(zip_model)
+print(zip_aic)
+```
+
+```{r}
+zinb_model <- zeroinfl(Monthly_Tornado_Count ~ ., data = train_set, dist="negbin")
+summary(zinb_model)
+
+zip_null <- zeroinfl(Monthly_Tornado_Count ~ 1, data = train_set)
+1 - as.numeric(logLik(zip_model)) / as.numeric(logLik(zip_null))
+
+zinb_aic <- AIC(zinb_model)
+print(zinb_aic)
+```
+
