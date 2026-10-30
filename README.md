@@ -1,2 +1,2 @@
 # Tornado-Prediction
-Run features through a Poissone Regression model to predict the count of Tornadoes per year in Kentucky
+Prediction Model Comparison using generalized linear models and machine learning algorithms.
